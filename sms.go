@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -54,7 +55,11 @@ type Query struct {
 
 // Text columns are hex encoded by SQLite on the phone. content query does
 // not escape values, so raw bodies could contain anything, including fake rows.
-var columns = []string{"_id", "hex(address)", "date", "type", "read", "hex(body)"}
+var hexColumns = []string{"_id", "hex(address)", "date", "type", "read", "hex(body)"}
+
+// plainColumns is the fallback for providers that only accept column names.
+// The order must match plainRowRe.
+var plainColumns = []string{"_id", "address", "date", "type", "read", "body"}
 
 var boxes = map[string]string{
 	"":       "content://sms",
@@ -76,11 +81,29 @@ func (d Device) Messages(ctx context.Context, q Query) ([]Message, error) {
 	if q.Limit > 0 {
 		sort += fmt.Sprintf(" LIMIT %d", q.Limit)
 	}
-	cmd := fmt.Sprintf("content query --uri %s --projection '%s' --sort '%s'", uri, strings.Join(columns, ":"), sort)
+	var where string
 	if q.AfterID > 0 {
-		cmd += fmt.Sprintf(" --where '_id>%d'", q.AfterID)
+		where = fmt.Sprintf("_id>%d", q.AfterID)
 	}
 
+	out, err := d.query(ctx, uri, hexColumns, where, sort)
+	if err == nil {
+		return parseHexRows(out)
+	}
+	msgs, plainErr := d.plainMessages(ctx, uri, where, sort)
+	if plainErr != nil {
+		return nil, fmt.Errorf("%w (plain column fallback: %v)", err, plainErr)
+	}
+	return msgs, nil
+}
+
+// query runs content query and returns its output, which is either rows or
+// "No result found.".
+func (d Device) query(ctx context.Context, uri string, columns []string, where, sort string) (string, error) {
+	cmd := fmt.Sprintf("content query --uri %s --projection '%s' --sort '%s'", uri, strings.Join(columns, ":"), sort)
+	if where != "" {
+		cmd += fmt.Sprintf(" --where '%s'", where)
+	}
 	var args []string
 	if d.Serial != "" {
 		args = append(args, "-s", d.Serial)
@@ -88,28 +111,29 @@ func (d Device) Messages(ctx context.Context, q Query) ([]Message, error) {
 	var stderr bytes.Buffer
 	c := exec.CommandContext(ctx, "adb", append(args, "shell", cmd)...)
 	c.Stderr = &stderr
-	out, err := c.Output()
+	b, err := c.Output()
+	out := string(b)
+	if err == nil && !strings.HasPrefix(out, "Row: ") && strings.TrimSpace(out) != "No result found." {
+		err = fmt.Errorf("unexpected content query output: %.200q", out)
+	}
 	if err == nil {
-		var msgs []Message
-		if msgs, err = parseRows(string(out)); err == nil {
-			return msgs, nil
-		}
+		return out, nil
 	}
 	// content query exits 0 on provider errors and explains them on stderr
 	if s := strings.TrimSpace(stderr.String()); s != "" {
-		return nil, fmt.Errorf("adb: %w: %s", err, s)
+		return "", fmt.Errorf("adb: %w: %s", err, s)
 	}
-	return nil, fmt.Errorf("adb: %w", err)
+	return "", fmt.Errorf("adb: %w", err)
 }
 
-func parseRows(out string) ([]Message, error) {
+func parseHexRows(out string) ([]Message, error) {
 	out = strings.TrimSpace(out)
 	if out == "No result found." {
 		return nil, nil
 	}
 	var msgs []Message
 	for _, line := range strings.Split(out, "\n") {
-		m, err := parseRow(line)
+		m, err := parseHexRow(line)
 		if err != nil {
 			return nil, err
 		}
@@ -118,40 +142,141 @@ func parseRows(out string) ([]Message, error) {
 	return msgs, nil
 }
 
-func parseRow(line string) (Message, error) {
+func parseHexRow(line string) (Message, error) {
 	bad := fmt.Errorf("unexpected content query output: %.200q", line)
 	if !strings.HasPrefix(line, "Row: ") {
 		return Message{}, bad
 	}
 	parts := strings.Split(line, ", ")
-	if len(parts) != len(columns) {
+	if len(parts) != len(hexColumns) {
 		return Message{}, bad
 	}
 	parts[0] = parts[0][strings.LastIndex(parts[0], " ")+1:] // drop "Row: N "
-	vals := make([]string, len(columns))
+	vals := make([]string, len(hexColumns))
 	for i, p := range parts {
-		v, ok := strings.CutPrefix(p, columns[i]+"=")
+		v, ok := strings.CutPrefix(p, hexColumns[i]+"=")
 		if !ok {
 			return Message{}, bad
 		}
-		if v != "NULL" {
-			vals[i] = v
-		}
+		vals[i] = v
 	}
+	for _, i := range []int{1, 5} {
+		if vals[i] == "NULL" {
+			vals[i] = ""
+			continue
+		}
+		b, err := hex.DecodeString(vals[i])
+		if err != nil {
+			return Message{}, fmt.Errorf("bad %s: %w", hexColumns[i], err)
+		}
+		vals[i] = string(b)
+	}
+	return toMessage(vals)
+}
 
+// plainMessages reads unencoded columns. The _id list comes first because
+// that output can't be ambiguous. The full rows are then split where the
+// next expected "Row: N _id=X, " starts.
+func (d Device) plainMessages(ctx context.Context, uri, where, sort string) ([]Message, error) {
+	out, err := d.query(ctx, uri, []string{"_id"}, where, sort)
+	if err != nil {
+		return nil, err
+	}
+	ids, err := parseIDs(out)
+	if err != nil || len(ids) == 0 {
+		return nil, err
+	}
+	// pin the set of rows, so messages arriving in between don't shift it
+	bounded := fmt.Sprintf("_id<=%d", ids[0])
+	if where != "" {
+		bounded = where + " AND " + bounded
+	}
+	out, err = d.query(ctx, uri, plainColumns, bounded, sort)
+	if err != nil {
+		return nil, err
+	}
+	return parsePlainRows(out, ids, func(id int64) (string, error) {
+		return d.query(ctx, uri, plainColumns, fmt.Sprintf("_id=%d", id), "_id")
+	})
+}
+
+func parseIDs(out string) ([]int64, error) {
+	if strings.TrimSpace(out) == "No result found." {
+		return nil, nil
+	}
+	var ids []int64
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		var n int
+		var id int64
+		if _, err := fmt.Sscanf(line, "Row: %d _id=%d", &n, &id); err != nil || n != len(ids) {
+			return nil, fmt.Errorf("unexpected content query output: %.200q", line)
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+// parsePlainRows splits rows using the known ids. When a body contains the
+// next row's start marker, the row is ambiguous and is fetched alone with
+// fetchOne, whose single-row output ends where the body ends.
+func parsePlainRows(out string, ids []int64, fetchOne func(id int64) (string, error)) ([]Message, error) {
+	msgs := make([]Message, 0, len(ids))
+	rest := out
+	for i, id := range ids {
+		prefix := fmt.Sprintf("Row: %d ", i)
+		if !strings.HasPrefix(rest, fmt.Sprintf("%s_id=%d, ", prefix, id)) {
+			return nil, fmt.Errorf("row %d is not _id %d, messages changed during the query", i, id)
+		}
+		row := rest
+		if i+1 < len(ids) {
+			marker := fmt.Sprintf("\nRow: %d _id=%d, ", i+1, ids[i+1])
+			switch strings.Count(rest, marker) {
+			case 0:
+				return nil, fmt.Errorf("row %d (_id %d) not found in content query output", i+1, ids[i+1])
+			case 1:
+				row = rest[:strings.Index(rest, marker)+1]
+			default:
+				one, err := fetchOne(id)
+				if err != nil {
+					return nil, err
+				}
+				row = prefix + strings.TrimPrefix(one, "Row: 0 ")
+				if !strings.HasPrefix(rest, row) {
+					return nil, fmt.Errorf("_id %d changed during the query", id)
+				}
+			}
+		}
+		rest = rest[len(row):]
+		m, err := parsePlainRow(strings.TrimSuffix(strings.TrimPrefix(row, prefix), "\n"))
+		if err != nil {
+			return nil, err
+		}
+		msgs = append(msgs, m)
+	}
+	return msgs, nil
+}
+
+// The numeric fields pin the match, so ", date=" inside an address only
+// matches when valid numeric fields follow it.
+var plainRowRe = regexp.MustCompile(`(?s)^_id=(\d+), address=(.*?), date=(\d+|NULL), type=(\d+|NULL), read=(\d+|NULL), body=(.*)$`)
+
+// parsePlainRow keeps the text "NULL" in address and body, since plain output
+// can't tell it from SQL NULL.
+func parsePlainRow(s string) (Message, error) {
+	m := plainRowRe.FindStringSubmatch(s)
+	if m == nil {
+		return Message{}, fmt.Errorf("unexpected content query row: %.100q", s)
+	}
+	return toMessage(m[1:])
+}
+
+// toMessage converts decoded values in plainColumns order.
+func toMessage(vals []string) (Message, error) {
 	id, err := strconv.ParseInt(vals[0], 10, 64)
 	if err != nil {
 		return Message{}, fmt.Errorf("bad _id: %w", err)
 	}
-	addr, err := hex.DecodeString(vals[1])
-	if err != nil {
-		return Message{}, fmt.Errorf("bad address: %w", err)
-	}
-	body, err := hex.DecodeString(vals[5])
-	if err != nil {
-		return Message{}, fmt.Errorf("bad body: %w", err)
-	}
 	ms, _ := strconv.ParseInt(vals[2], 10, 64)
 	typ, _ := strconv.Atoi(vals[3])
-	return Message{ID: id, Address: string(addr), Date: time.UnixMilli(ms), Type: typ, Read: vals[4] == "1", Body: string(body)}, nil
+	return Message{ID: id, Address: vals[1], Date: time.UnixMilli(ms), Type: typ, Read: vals[4] == "1", Body: vals[5]}, nil
 }
