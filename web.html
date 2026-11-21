@@ -1,0 +1,37 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SMS</title>
+<style>
+  :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+  body { max-width: 50rem; margin: 0 auto; padding: 1rem; }
+  form { display: flex; gap: .5rem; margin-bottom: 1rem; }
+  input[type=search] { flex: 1; }
+  article { border-bottom: 1px solid #8884; padding: .6rem 0; }
+  header { display: flex; justify-content: space-between; font-size: .9rem; opacity: .75; }
+  p { margin: .3rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+<form>
+  <input type="search" name="q" value="{{.Q}}" placeholder="search sender or text" autofocus>
+  <select name="dev" onchange="this.form.submit()">
+    {{range .Devs}}<option value="{{.Serial}}"{{if eq .Serial $.Serial}} selected{{end}}{{if ne .State "device"}} disabled{{end}}>{{.}}</option>{{else}}<option>no phones</option>{{end}}
+  </select>
+  <select name="box"onchange="this.form.submit()">
+    {{range $b := .Boxes}}<option{{if eq $b $.Box}} selected{{end}}>{{$b}}</option>{{end}}
+  </select>
+  <button>go</button>
+</form>
+{{range .Msgs}}
+<article>
+  <header><b>{{.Dir}} {{.Address}}</b><time>{{.Date.Format "2006-01-02 15:04"}}</time></header>
+  <p>{{.Body}}</p>
+</article>
+{{else}}
+<p>no messages</p>
+{{end}}
+</body>
+</html>
