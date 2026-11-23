@@ -15,7 +15,7 @@ import (
 type item struct{ m Message }
 
 func (i item) Title() string {
-	return fmt.Sprintf("%s %s  %s", i.m.Dir(), Printable(i.m.Address), i.m.Date.Format("2006-01-02 15:04"))
+	return fmt.Sprintf("%s%s %s  %s", i.m.Mark(), i.m.Dir(), Printable(i.m.Address), i.m.Date.Format("2006-01-02 15:04"))
 }
 func (i item) Description() string {
 	first, _, _ := strings.Cut(Printable(i.m.Body), "\n")
@@ -35,8 +35,9 @@ func (i devItem) Description() string {
 func (i devItem) FilterValue() string { return i.d.Name + " " + i.d.Serial }
 
 type loadedMsg struct {
-	msgs []Message
-	err  error
+	msgs   []Message
+	unread bool
+	err    error
 }
 
 type devicesMsg struct {
@@ -48,6 +49,7 @@ type tuiModel struct {
 	ctx     context.Context
 	dev     Device
 	box     string
+	unread  bool
 	list    list.Model
 	devices list.Model
 	view    viewport.Model
@@ -64,7 +66,7 @@ func runTUI(ctx context.Context, dev Device, args []string) error {
 	fs.Parse(args)
 
 	l := list.New(nil, list.NewDefaultDelegate(), 0, 0)
-	l.Title = "SMS  enter: open  r: reload  d: pick phone"
+	l.Title = "SMS  enter: open  r: reload  u: unread  d: pick phone"
 	dl := list.New(nil, list.NewDefaultDelegate(), 0, 0)
 	dl.Title = "Pick phone  enter: select  r: rescan"
 	pick := dev.Serial == ""
@@ -74,8 +76,8 @@ func runTUI(ctx context.Context, dev Device, args []string) error {
 }
 
 func (t tuiModel) load() tea.Msg {
-	msgs, err := t.dev.Messages(t.ctx, Query{Box: t.box})
-	return loadedMsg{msgs, err}
+	msgs, err := t.dev.Messages(t.ctx, Query{Box: t.box, Unread: t.unread})
+	return loadedMsg{msgs, t.unread, err}
 }
 
 func (t tuiModel) loadDevices() tea.Msg {
@@ -93,7 +95,7 @@ func (t tuiModel) Init() tea.Cmd {
 func (t tuiModel) selectDevice(d DeviceInfo) (tuiModel, tea.Cmd) {
 	t.dev.Serial = d.Serial
 	t.picking = false
-	t.list.Title = d.Name + "  enter: open  r: reload  d: pick phone"
+	t.list.Title = d.Name + "  enter: open  r: reload  u: unread  d: pick phone"
 	return t, tea.Batch(t.list.SetItems(nil), t.list.NewStatusMessage("loading"), t.load)
 }
 
@@ -104,6 +106,9 @@ func (t tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		t.devices.SetSize(msg.Width, msg.Height)
 		t.view.Width, t.view.Height = msg.Width, msg.Height
 	case loadedMsg:
+		if msg.unread != t.unread {
+			return t, nil // started before the last u press
+		}
 		if msg.err != nil {
 			return t, t.list.NewStatusMessage("error: " + msg.err.Error())
 		}
@@ -180,6 +185,13 @@ func (t tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return t, nil
 			case "r":
 				return t, tea.Batch(t.list.NewStatusMessage("reloading"), t.load)
+			case "u":
+				t.unread = !t.unread
+				status := "all messages"
+				if t.unread {
+					status = "unread only"
+				}
+				return t, tea.Batch(t.list.NewStatusMessage(status), t.load)
 			case "d":
 				t.picking = true
 				return t, t.loadDevices

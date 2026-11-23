@@ -51,6 +51,18 @@ type Query struct {
 	Box     string // "", "all", "inbox", "sent", "draft", "outbox"
 	Limit   int    // 0 means no limit
 	AfterID int64  // only messages with a greater _id
+	Unread  bool   // only messages with read 0 or NULL, matching Message.Read
+}
+
+func (q Query) where() string {
+	var conds []string
+	if q.AfterID > 0 {
+		conds = append(conds, fmt.Sprintf("_id>%d", q.AfterID))
+	}
+	if q.Unread {
+		conds = append(conds, "ifnull(read,0)=0")
+	}
+	return strings.Join(conds, " AND ")
 }
 
 // Text columns are hex encoded by SQLite on the phone. content query does
@@ -70,6 +82,14 @@ var boxes = map[string]string{
 	"outbox": "content://sms/outbox",
 }
 
+// Mark is "*" for unread messages, so they stand out in plain text lists.
+func (m Message) Mark() string {
+	if m.Read {
+		return " "
+	}
+	return "*"
+}
+
 func (d Device) Messages(ctx context.Context, q Query) ([]Message, error) {
 	uri, ok := boxes[q.Box]
 	if !ok {
@@ -81,10 +101,7 @@ func (d Device) Messages(ctx context.Context, q Query) ([]Message, error) {
 	if q.Limit > 0 {
 		sort += fmt.Sprintf(" LIMIT %d", q.Limit)
 	}
-	var where string
-	if q.AfterID > 0 {
-		where = fmt.Sprintf("_id>%d", q.AfterID)
-	}
+	where := q.where()
 
 	out, err := d.query(ctx, uri, hexColumns, where, sort)
 	if err == nil {

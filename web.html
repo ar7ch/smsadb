@@ -11,6 +11,7 @@
   input[type=search] { flex: 1; }
   article { border-bottom: 1px solid #8884; padding: .6rem 0; }
   header { display: flex; justify-content: space-between; font-size: .9rem; opacity: .75; }
+  article.unread header { opacity: 1; }
   p { margin: .3rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 </style>
 </head>
@@ -23,11 +24,12 @@
   <select name="box"onchange="this.form.submit()">
     {{range $b := .Boxes}}<option{{if eq $b $.Box}} selected{{end}}>{{$b}}</option>{{end}}
   </select>
+  <label><input type="checkbox" name="unread" value="1"{{if .Unread}} checked{{end}} onchange="this.form.submit()"> unread</label>
   <button>go</button>
 </form>
 {{range .Msgs}}
-<article>
-  <header><b>{{.Dir}} {{.Address}}</b><time>{{.Date.Format "2006-01-02 15:04"}}</time></header>
+<article{{if not .Read}} class="unread"{{end}}>
+  <header><b>{{if not .Read}}● {{end}}{{.Dir}} {{.Address}}</b><time>{{.Date.Format "2006-01-02 15:04"}}</time></header>
   <p>{{.Body}}</p>
 </article>
 {{else}}

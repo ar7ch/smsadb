@@ -124,3 +124,9 @@ func TestPlainMatchesHexLive(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, want, got)
 }
+
+func TestQueryWhere(t *testing.T) {
+	assert.Equal(t, "", Query{}.where())
+	assert.Equal(t, "_id>5", Query{AfterID: 5}.where())
+	assert.Equal(t, "_id>5 AND ifnull(read,0)=0", Query{AfterID: 5, Unread: true}.where())
+}

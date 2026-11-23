@@ -74,10 +74,11 @@ func runList(ctx context.Context, dev Device, args []string) error {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 	box := fs.String("box", "all", "all, inbox, sent, draft or outbox")
 	n := fs.Int("n", 20, "max messages, 0 for all")
+	unread := fs.Bool("unread", false, "only unread messages")
 	asJSON := fs.Bool("json", false, "print JSON")
 	fs.Parse(args)
 
-	msgs, err := dev.Messages(ctx, Query{Box: *box, Limit: *n})
+	msgs, err := dev.Messages(ctx, Query{Box: *box, Limit: *n, Unread: *unread})
 	if err != nil {
 		return err
 	}
@@ -90,7 +91,7 @@ func runList(ctx context.Context, dev Device, args []string) error {
 		return enc.Encode(msgs)
 	}
 	for _, m := range msgs {
-		fmt.Printf("%s %s %s\n%s\n\n", m.Date.Format("2006-01-02 15:04"), m.Dir(), Printable(m.Address), Printable(m.Body))
+		fmt.Printf("%s%s %s %s\n%s\n\n", m.Mark(), m.Date.Format("2006-01-02 15:04"), m.Dir(), Printable(m.Address), Printable(m.Body))
 	}
 	return nil
 }

@@ -25,6 +25,7 @@ func runWeb(ctx context.Context, dev Device, args []string) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		box, q, serial := r.FormValue("box"), r.FormValue("q"), r.FormValue("dev")
+		unread := r.FormValue("unread") != ""
 		if box == "" {
 			box = "all"
 		}
@@ -60,7 +61,7 @@ func runWeb(ctx context.Context, dev Device, args []string) error {
 		}
 		var msgs []Message
 		if serial != "" {
-			msgs, err = Device{Serial: serial}.Messages(r.Context(), Query{Box: box, Limit: limit})
+			msgs, err = Device{Serial: serial}.Messages(r.Context(), Query{Box: box, Limit: limit, Unread: unread})
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadGateway)
 				return
@@ -82,10 +83,11 @@ func runWeb(ctx context.Context, dev Device, args []string) error {
 		}
 		data := struct {
 			Box, Q, Serial string
+			Unread         bool
 			Boxes          []string
 			Devs           []DeviceInfo
 			Msgs           []Message
-		}{box, q, serial, []string{"all", "inbox", "sent", "draft", "outbox"}, devs, msgs}
+		}{box, q, serial, unread, []string{"all", "inbox", "sent", "draft", "outbox"}, devs, msgs}
 		if err := webTmpl.Execute(w, data); err != nil {
 			log.Print(err)
 		}
