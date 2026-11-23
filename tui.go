@@ -7,6 +7,7 @@ import (
 	"io"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -61,10 +62,17 @@ func (i devItem) Description() string {
 func (i devItem) FilterValue() string { return i.d.Name + " " + i.d.Serial }
 
 type loadedMsg struct {
-	msgs   []Message
-	serial string
-	unread bool
-	err    error
+	msgs []Message
+	seq  int
+	err  error
+}
+
+type tickMsg struct{}
+
+const reloadEvery = 15 * time.Second
+
+func tick() tea.Cmd {
+	return tea.Tick(reloadEvery, func(time.Time) tea.Msg { return tickMsg{} })
 }
 
 type markedMsg struct {
@@ -89,6 +97,8 @@ type tuiModel struct {
 	detail  bool
 	opened  item // message shown in the detail view
 	picking bool
+	loading bool
+	loadSeq int // bumped by each reload, only the latest result is shown
 	// autoPick selects the phone without showing the picker when only one
 	// is attached. Only the first device scan does this.
 	autoPick bool
@@ -111,7 +121,7 @@ func runTUI(ctx context.Context, dev Device, args []string) error {
 
 func (t tuiModel) load() tea.Msg {
 	msgs, err := t.dev.Messages(t.ctx, Query{Box: t.box, Unread: t.unread})
-	return loadedMsg{msgs, t.dev.Serial, t.unread, err}
+	return loadedMsg{msgs, t.loadSeq, err}
 }
 
 // markRead marks a message as read on the phone.
@@ -128,18 +138,27 @@ func (t tuiModel) loadDevices() tea.Msg {
 	return devicesMsg{devs, err}
 }
 
+// reload starts loading messages and shows the spinner until they arrive.
+func (t *tuiModel) reload() tea.Cmd {
+	t.loading = true
+	t.loadSeq++
+	return tea.Batch(t.list.StartSpinner(), t.load)
+}
+
 func (t tuiModel) Init() tea.Cmd {
 	if t.picking {
-		return t.loadDevices
+		return tea.Batch(t.loadDevices, tick())
 	}
-	return t.load
+	// the first tickMsg starts the first load
+	return func() tea.Msg { return tickMsg{} }
 }
 
 func (t tuiModel) selectDevice(d DeviceInfo) (tuiModel, tea.Cmd) {
 	t.dev.Serial = d.Serial
 	t.picking = false
 	t.list.Title = d.Name + "  enter: open  r: reload  R: mark read  u: unread  d: pick phone"
-	return t, tea.Batch(t.list.SetItems(nil), t.list.NewStatusMessage("loading"), t.load)
+	cmd := t.reload()
+	return t, tea.Batch(t.list.SetItems(nil), cmd)
 }
 
 func (t tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -148,18 +167,38 @@ func (t tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		t.list.SetSize(msg.Width, msg.Height)
 		t.devices.SetSize(msg.Width, msg.Height)
 		t.view.Width, t.view.Height = msg.Width, msg.Height
-	case loadedMsg:
-		if msg.serial != t.dev.Serial || msg.unread != t.unread {
-			return t, nil // started before a phone switch or u press
+	case tickMsg:
+		if t.picking || t.loading {
+			return t, tick()
 		}
+		cmd := t.reload()
+		return t, tea.Batch(tick(), cmd)
+	case loadedMsg:
+		if msg.seq != t.loadSeq {
+			return t, nil
+		}
+		t.loading = false
+		t.list.StopSpinner()
 		if msg.err != nil {
 			return t, t.list.NewStatusMessage("error: " + msg.err.Error())
 		}
+		sel, hadSel := t.list.SelectedItem().(item)
 		items := make([]list.Item, len(msg.msgs))
 		for i, m := range msg.msgs {
 			items[i] = item{m}
 		}
-		return t, t.list.SetItems(items)
+		cmd := t.list.SetItems(items)
+		// keep the cursor on the same message when new ones arrive on top.
+		// While filtering, SetItems refilters asynchronously, so skip it.
+		if hadSel && t.list.FilterState() == list.Unfiltered {
+			for i, li := range items {
+				if li.(item).m.ID == sel.m.ID {
+					t.list.Select(i)
+					break
+				}
+			}
+		}
+		return t, cmd
 	case markedMsg:
 		if msg.serial != t.dev.Serial {
 			return t, nil
@@ -250,7 +289,8 @@ func (t tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return t, nil
 			case "r":
-				return t, tea.Batch(t.list.NewStatusMessage("reloading"), t.load)
+				cmd := t.reload()
+				return t, cmd
 			case "R":
 				it, ok := t.list.SelectedItem().(item)
 				return t, t.markRead(it, ok)
@@ -260,7 +300,8 @@ func (t tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if t.unread {
 					status = "unread only"
 				}
-				return t, tea.Batch(t.list.NewStatusMessage(status), t.load)
+				cmd := t.reload()
+				return t, tea.Batch(t.list.NewStatusMessage(status), cmd)
 			case "d":
 				t.picking = true
 				return t, t.loadDevices
