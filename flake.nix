@@ -24,7 +24,7 @@
       });
 
       devShells = forAll (pkgs: {
-        default = pkgs.mkShell { packages = [ pkgs.go pkgs.gopls ]; };
+        default = pkgs.mkShell { packages = [ pkgs.go pkgs.gopls pkgs.golangci-lint ]; };
       });
     };
 }

@@ -1,0 +1,9 @@
+version: "2"
+linters:
+  settings:
+    errcheck:
+      exclude-functions:
+        # FlagSets use ExitOnError, so Parse never returns an error
+        - (*flag.FlagSet).Parse
+        - (io.ReadCloser).Close
+        - (*net/http.Server).Shutdown
