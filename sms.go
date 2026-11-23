@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os/exec"
 	"regexp"
@@ -121,6 +122,42 @@ func (d Device) query(ctx context.Context, uri string, columns []string, where, 
 	if where != "" {
 		cmd += fmt.Sprintf(" --where '%s'", where)
 	}
+	return d.shell(ctx, cmd, func(out string) error {
+		if !strings.HasPrefix(out, "Row: ") && strings.TrimSpace(out) != "No result found." {
+			return fmt.Errorf("unexpected content query output: %.200q", out)
+		}
+		return nil
+	})
+}
+
+// MarkRead sets read=1 on one message. Android drops SMS writes from apps
+// other than the default SMS app without an error, so the result is checked.
+func (d Device) MarkRead(ctx context.Context, id int64) error {
+	cmd := fmt.Sprintf("content update --uri content://sms --bind read:i:1 --where '_id=%d'", id)
+	if _, err := d.shell(ctx, cmd, nil); err != nil {
+		return err
+	}
+	out, err := d.query(ctx, "content://sms", []string{"_id"}, fmt.Sprintf("_id=%d AND read=1", id), "_id")
+	if err != nil {
+		return err
+	}
+	ids, err := parseIDs(out)
+	if err != nil {
+		return err
+	}
+	if len(ids) == 0 {
+		adb := "adb"
+		if d.Serial != "" {
+			adb += " -s " + d.Serial
+		}
+		return fmt.Errorf("phone ignored the write, allow it with: %s shell appops set com.android.shell WRITE_SMS allow", adb)
+	}
+	return nil
+}
+
+// shell runs cmd on the device. check, when set, validates the output.
+// Without check, any stderr output counts as a failure.
+func (d Device) shell(ctx context.Context, cmd string, check func(out string) error) (string, error) {
 	var args []string
 	if d.Serial != "" {
 		args = append(args, "-s", d.Serial)
@@ -130,13 +167,17 @@ func (d Device) query(ctx context.Context, uri string, columns []string, where, 
 	c.Stderr = &stderr
 	b, err := c.Output()
 	out := string(b)
-	if err == nil && !strings.HasPrefix(out, "Row: ") && strings.TrimSpace(out) != "No result found." {
-		err = fmt.Errorf("unexpected content query output: %.200q", out)
+	switch {
+	case err != nil:
+	case check != nil:
+		err = check(out)
+	case stderr.Len() > 0:
+		err = errors.New("unexpected stderr output")
 	}
 	if err == nil {
 		return out, nil
 	}
-	// content query exits 0 on provider errors and explains them on stderr
+	// content exits 0 on provider errors and explains them on stderr
 	if s := strings.TrimSpace(stderr.String()); s != "" {
 		return "", fmt.Errorf("adb: %w: %s", err, s)
 	}

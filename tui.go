@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/list"
@@ -61,7 +62,14 @@ func (i devItem) FilterValue() string { return i.d.Name + " " + i.d.Serial }
 
 type loadedMsg struct {
 	msgs   []Message
+	serial string
 	unread bool
+	err    error
+}
+
+type markedMsg struct {
+	serial string
+	id     int64
 	err    error
 }
 
@@ -79,6 +87,7 @@ type tuiModel struct {
 	devices list.Model
 	view    viewport.Model
 	detail  bool
+	opened  item // message shown in the detail view
 	picking bool
 	// autoPick selects the phone without showing the picker when only one
 	// is attached. Only the first device scan does this.
@@ -91,8 +100,8 @@ func runTUI(ctx context.Context, dev Device, args []string) error {
 	fs.Parse(args)
 
 	l := list.New(nil, newMsgDelegate(), 0, 0)
-	l.Title = "SMS  enter: open  r: reload  u: unread  d: pick phone"
-	dl := list.New(nil, newMsgDelegate(), 0, 0)
+	l.Title = "SMS  enter: open  r: reload  R: mark read  u: unread  d: pick phone"
+	dl := list.New(nil, list.NewDefaultDelegate(), 0, 0)
 	dl.Title = "Pick phone  enter: select  r: rescan"
 	pick := dev.Serial == ""
 	m := tuiModel{ctx: ctx, dev: dev, box: *box, list: l, devices: dl, view: viewport.New(0, 0), picking: pick, autoPick: pick}
@@ -102,7 +111,16 @@ func runTUI(ctx context.Context, dev Device, args []string) error {
 
 func (t tuiModel) load() tea.Msg {
 	msgs, err := t.dev.Messages(t.ctx, Query{Box: t.box, Unread: t.unread})
-	return loadedMsg{msgs, t.unread, err}
+	return loadedMsg{msgs, t.dev.Serial, t.unread, err}
+}
+
+// markRead marks a message as read on the phone.
+func (t tuiModel) markRead(it item, ok bool) tea.Cmd {
+	if !ok || it.m.Read {
+		return nil
+	}
+	dev, id := t.dev, it.m.ID
+	return func() tea.Msg { return markedMsg{dev.Serial, id, dev.MarkRead(t.ctx, id)} }
 }
 
 func (t tuiModel) loadDevices() tea.Msg {
@@ -120,7 +138,7 @@ func (t tuiModel) Init() tea.Cmd {
 func (t tuiModel) selectDevice(d DeviceInfo) (tuiModel, tea.Cmd) {
 	t.dev.Serial = d.Serial
 	t.picking = false
-	t.list.Title = d.Name + "  enter: open  r: reload  u: unread  d: pick phone"
+	t.list.Title = d.Name + "  enter: open  r: reload  R: mark read  u: unread  d: pick phone"
 	return t, tea.Batch(t.list.SetItems(nil), t.list.NewStatusMessage("loading"), t.load)
 }
 
@@ -131,8 +149,8 @@ func (t tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		t.devices.SetSize(msg.Width, msg.Height)
 		t.view.Width, t.view.Height = msg.Width, msg.Height
 	case loadedMsg:
-		if msg.unread != t.unread {
-			return t, nil // started before the last u press
+		if msg.serial != t.dev.Serial || msg.unread != t.unread {
+			return t, nil // started before a phone switch or u press
 		}
 		if msg.err != nil {
 			return t, t.list.NewStatusMessage("error: " + msg.err.Error())
@@ -142,6 +160,25 @@ func (t tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			items[i] = item{m}
 		}
 		return t, t.list.SetItems(items)
+	case markedMsg:
+		if msg.serial != t.dev.Serial {
+			return t, nil
+		}
+		if msg.err != nil {
+			return t, t.list.NewStatusMessage("error: " + msg.err.Error())
+		}
+		for i, li := range t.list.Items() {
+			if it, ok := li.(item); ok && it.m.ID == msg.id {
+				if t.unread {
+					// SetItems refilters, RemoveItem leaves stale filter indexes
+					items := slices.Delete(t.list.Items(), i, i+1)
+					return t, t.list.SetItems(items)
+				}
+				it.m.Read = true
+				return t, t.list.SetItem(i, it)
+			}
+		}
+		return t, nil
 	case devicesMsg:
 		if msg.err != nil {
 			return t, t.devices.NewStatusMessage("error: " + msg.err.Error())
@@ -169,6 +206,9 @@ func (t tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "esc", "q", "backspace":
 				t.detail = false
 				return t, nil
+			case "R":
+				t.detail = false
+				return t, t.markRead(t.opened, true)
 			}
 			var cmd tea.Cmd
 			t.view, cmd = t.view.Update(msg)
@@ -203,13 +243,17 @@ func (t tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter":
 				if it, ok := t.list.SelectedItem().(item); ok {
 					t.detail = true
+					t.opened = it
 					t.view.SetContent(lipgloss.NewStyle().Width(t.view.Width).Render(
-						it.Title() + "\n\n" + Printable(it.m.Body) + "\n\n(esc: back)"))
+						it.Title() + "\n\n" + Printable(it.m.Body) + "\n\n(esc: back  R: mark read)"))
 					t.view.GotoTop()
 				}
 				return t, nil
 			case "r":
 				return t, tea.Batch(t.list.NewStatusMessage("reloading"), t.load)
+			case "R":
+				it, ok := t.list.SelectedItem().(item)
+				return t, t.markRead(it, ok)
 			case "u":
 				t.unread = !t.unread
 				status := "all messages"
