@@ -10,6 +10,7 @@ import (
 	"log"
 	"mime"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,6 +27,13 @@ func runNtfy(ctx context.Context, dev Device, args []string) error {
 	fset.Parse(args)
 	if *url == "" {
 		return errors.New("ntfy: -push-url is required")
+	}
+	if *interval <= 0 {
+		return errors.New("ntfy: -interval must be positive")
+	}
+	u, err := neturl.Parse(*url)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || strings.Trim(u.Path, "/") == "" {
+		return errors.New("ntfy: -push-url must be an http(s) URL with a topic, e.g. https://ntfy.sh/your-topic")
 	}
 	token := os.Getenv("NTFY_TOKEN")
 
@@ -48,7 +56,8 @@ func runNtfy(ctx context.Context, dev Device, args []string) error {
 	if err != nil {
 		return err
 	}
-	log.Printf("pushing inbox messages after id %d to %s every %s", last, *url, *interval)
+	// the topic name works as a password on public servers, keep it out of logs
+	log.Printf("pushing inbox messages after id %d to %s every %s", last, u.Host, *interval)
 
 	for {
 		msgs, err := dev.Messages(ctx, Query{Box: "inbox", AfterID: last})
@@ -123,6 +132,11 @@ func push(ctx context.Context, url, token string, m Message) error {
 	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
+		// url.Error repeats the topic URL
+		var ue *neturl.Error
+		if errors.As(err, &ue) {
+			return fmt.Errorf("ntfy: %s %s: %w", ue.Op, req.URL.Host, ue.Err)
+		}
 		return err
 	}
 	defer resp.Body.Close()
