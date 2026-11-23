@@ -20,10 +20,13 @@ import (
 
 func runNtfy(ctx context.Context, dev Device, args []string) error {
 	fset := flag.NewFlagSet("ntfy", flag.ExitOnError)
-	url := fset.String("url", "", "ntfy topic URL")
+	url := fset.String("push-url", "", "ntfy topic URL, e.g. https://ntfy.sh/your-secret-topic (required)")
 	interval := fset.Duration("interval", 30*time.Second, "poll interval")
 	state := fset.String("state", "", "file with the last pushed message id (default: per phone, in the user cache dir)")
 	fset.Parse(args)
+	if *url == "" {
+		return errors.New("ntfy: -push-url is required")
+	}
 	token := os.Getenv("NTFY_TOKEN")
 
 	// Message ids are per phone, so pin the phone and keep one state file each.
