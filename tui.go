@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/list"
@@ -22,6 +23,30 @@ func (i item) Description() string {
 	return first
 }
 func (i item) FilterValue() string { return i.m.Address + " " + i.m.Body }
+
+// msgDelegate draws unread messages in bold accent colors.
+type msgDelegate struct{ read, unread list.DefaultDelegate }
+
+func newMsgDelegate() msgDelegate {
+	d := msgDelegate{list.NewDefaultDelegate(), list.NewDefaultDelegate()}
+	accent := lipgloss.AdaptiveColor{Light: "#1D4ED8", Dark: "#60A5FA"}
+	st := &d.unread.Styles
+	st.NormalTitle = st.NormalTitle.Bold(true).Foreground(accent)
+	st.NormalDesc = st.NormalDesc.Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#dddddd"})
+	st.SelectedTitle = st.SelectedTitle.Bold(true)
+	return d
+}
+
+func (d msgDelegate) Height() int                               { return d.read.Height() }
+func (d msgDelegate) Spacing() int                              { return d.read.Spacing() }
+func (d msgDelegate) Update(msg tea.Msg, m *list.Model) tea.Cmd { return nil }
+func (d msgDelegate) Render(w io.Writer, m list.Model, index int, it list.Item) {
+	if i, ok := it.(item); ok && !i.m.Read {
+		d.unread.Render(w, m, index, it)
+		return
+	}
+	d.read.Render(w, m, index, it)
+}
 
 type devItem struct{ d DeviceInfo }
 
@@ -65,9 +90,9 @@ func runTUI(ctx context.Context, dev Device, args []string) error {
 	box := fs.String("box", "all", "all, inbox, sent, draft or outbox")
 	fs.Parse(args)
 
-	l := list.New(nil, list.NewDefaultDelegate(), 0, 0)
+	l := list.New(nil, newMsgDelegate(), 0, 0)
 	l.Title = "SMS  enter: open  r: reload  u: unread  d: pick phone"
-	dl := list.New(nil, list.NewDefaultDelegate(), 0, 0)
+	dl := list.New(nil, newMsgDelegate(), 0, 0)
 	dl.Title = "Pick phone  enter: select  r: rescan"
 	pick := dev.Serial == ""
 	m := tuiModel{ctx: ctx, dev: dev, box: *box, list: l, devices: dl, view: viewport.New(0, 0), picking: pick, autoPick: pick}
